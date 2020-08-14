@@ -1263,9 +1263,9 @@ public class DatabaseINode {
       System.out.println(ex.getMessage());
     }
 
-    // if (LOG.isInfoEnabled()) {
-    //   LOG.info("getChildrenIds: (" + childNames + "," + parentId + ")");
-    // }
+    if (LOG.isInfoEnabled()) {
+      LOG.info("getChildrenNames: (" + parentId + ")");
+    }
 
     return childNames;
   }

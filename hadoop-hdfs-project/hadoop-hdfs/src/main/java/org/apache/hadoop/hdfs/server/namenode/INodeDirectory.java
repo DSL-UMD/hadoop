@@ -185,7 +185,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
       childNums = Integer.parseInt(nums);
     }
     filter = new CuckooFilter.Builder<CharSequence>(Funnels.stringFunnel(Charset.defaultCharset()), childNums)
-      .withFalsePositiveRate(0.01).withHashAlgorithm(Algorithm.xxHash64).build();
+      .withFalsePositiveRate(0.001).withHashAlgorithm(Algorithm.xxHash64).build();
   }
 
   /** @return true unconditionally. */
