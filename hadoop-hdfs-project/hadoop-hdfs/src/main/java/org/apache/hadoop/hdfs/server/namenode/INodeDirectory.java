@@ -95,7 +95,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
     super(id, name, permissions, mtime, 0L, 0L, parentName);
   }
 
-  public getFilter() {
+  public CuckooFilter<CharSequence> getFilter() {
     if (filter == null) {
       filter = FSDirectory.getInstance().borrowFilter();
     }
