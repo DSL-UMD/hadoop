@@ -53,6 +53,7 @@ import static org.apache.hadoop.hdfs.server.namenode.FSImageFormatPBINode.Loader
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.FileSummary;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.FilesUnderConstructionSection.FileUnderConstructionEntry;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeDirectorySection;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.NamespaceSubtree;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.AclFeatureProto;
 import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.XAttrCompactProto;
@@ -164,7 +165,45 @@ public class FSEditLogProtocolImpl implements FSEditLogProtocol {
 
     @Override
     public void logEdit(byte[] in) throws IOException {
-        return;
+        NamespaceSubtree tree = null;
+        try {	
+            tree = NamespaceSubtree.parseFrom(in);	
+        } catch (InvalidProtocolBufferException e) {	
+            e.printStackTrace();	
+        }	
+
+        for (INodeSection.INode inode : tree.getInodesList()) {
+            INode parent;
+            switch (inode.getType()) {	
+                case FILE:	
+                    INodeFile file = loadINodeFile(inode);	
+                    String filename = file.getLocalName();;	
+                    INodeKeyedObjects.getCache().put(file.getPath(), file);	
+                    // INodeKeyedObjects.getUpdateSet().add(file.getPath());	
+                    FSDirectory.getInstance().getEditLog().logOpenFile(null, file, true, false);	
+                    parent = INodeKeyedObjects.getCache().getIfPresent(Long.class, (Long)file.getParentId()); 	
+                    if (parent != null) {
+                        parent.asDirectory().addChild(file);	
+                        // parent.asDirectory().filter.put(String.valueOf(file.getParentId()) + filename);	
+                    }
+                    break;
+                case DIRECTORY:	
+                    INodeDirectory dir = loadINodeDirectory(inode);	
+                    String dirname = DFSUtil.bytes2String(dir.getLocalNameBytes());	
+                    INodeKeyedObjects.getCache().put(dir.getPath(), dir);	
+                    // INodeKeyedObjects.getUpdateSet().add(inode.getPath());	
+                    FSDirectory.getInstance().getEditLog().logMkDir(null, dir);	
+                    parent = INodeKeyedObjects.getCache().getIfPresent(
+                        Long.class, (Long)dir.getParentId()); 	
+                    if (parent != null) {	
+                        parent.asDirectory().addChild(dir);	
+                        // parent.asDirectory().filter.put(String.valueOf(dir.getParentId()) + dirname);	
+                    }
+                    break;
+                default:	
+                    break;
+            }
+        }
     }
 
     @Override

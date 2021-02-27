@@ -120,6 +120,11 @@ message Operation {
   }
 }
 
+// namespace subtree
+message NamespaceSubtree {
+  repeated INodeSection.INode inodes = 1;
+}
+
 /**
  * Permission is serialized as a 64-bit long. [0:24):[25:48):[48:64) (in Big Endian).
  * The first and the second parts are the string ids of the user and

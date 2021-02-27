@@ -48,6 +48,17 @@ import org.apache.hadoop.hdfs.server.namenode.snapshot.DirectorySnapshottableFea
 import org.apache.hadoop.hdfs.server.namenode.snapshot.DirectoryWithSnapshotFeature;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.DirectoryWithSnapshotFeature.DirectoryDiffList;
 import org.apache.hadoop.hdfs.server.namenode.snapshot.Snapshot;
+import org.apache.hadoop.hdfs.protocolPB.PBHelperClient;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.FileSummary;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.FilesUnderConstructionSection.FileUnderConstructionEntry;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeDirectorySection;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.NamespaceSubtree;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.AclFeatureProto;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.XAttrCompactProto;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.XAttrFeatureProto;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.QuotaByStorageTypeEntryProto;
+import org.apache.hadoop.hdfs.server.namenode.FsImageProto.INodeSection.QuotaByStorageTypeFeatureProto;
 import org.apache.hadoop.hdfs.util.ReadOnlyList;
 import org.apache.hadoop.hdfs.db.*;
 
@@ -60,6 +71,17 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import org.apache.hadoop.security.AccessControlException;
 import org.apache.hadoop.hdfs.nnproxy.tools.LookupMount;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
+import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.protocol.Block;
+import static org.apache.hadoop.hdfs.server.namenode.FSImageFormatPBINode.Saver.buildAclEntries;
+import static org.apache.hadoop.hdfs.server.namenode.FSImageFormatPBINode.Saver.buildXAttrs;
+
+import java.io.ByteArrayOutputStream;
+import java.net.InetSocketAddress;
+import com.google.protobuf.ByteString;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.ipc.RPC;
 
 /**
  * Directory INode class.
@@ -88,7 +110,7 @@ public class INodeDirectory extends INodeWithAdditionalFields
 
   private HashSet<String> children = new HashSet<>();
 
-  public CuckooFilter<CharSequence> filter;
+  // public CuckooFilter<CharSequence> filter;
 
   /** constructor */
   public INodeDirectory(long id, byte[] name, PermissionStatus permissions,
@@ -96,12 +118,12 @@ public class INodeDirectory extends INodeWithAdditionalFields
     super(id, name, permissions, mtime, 0L, 0L, parentName);
   }
 
-  public CuckooFilter<CharSequence> getFilter() {
-    if (filter == null) {
-      filter = FSDirectory.getInstance().borrowFilter();
-    }
-    return filter;
-  }
+  // public CuckooFilter<CharSequence> getFilter() {
+  //   if (filter == null) {
+  //     filter = FSDirectory.getInstance().borrowFilter();
+  //   }
+  //   return filter;
+  // }
 
   public void updateINodeDirectory() {
     super.updateINode(0L);
@@ -703,48 +725,161 @@ public class INodeDirectory extends INodeWithAdditionalFields
     }
   }
 
-void update_subtree(Set<INode> renameSet) {
-  List<Long> longAttr = new ArrayList<>();
-  List<String> strAttr = new ArrayList<>();
+  public INodeSection.INode seralizeINodeFile(INodeFile newNode) {
+    INodeSection.INodeFile.Builder b = INodeSection.INodeFile.newBuilder()
+      .setAccessTime(newNode.getAccessTime())
+      .setModificationTime(newNode.getModificationTime())
+      .setPermission(newNode.getPermissionLong())
+      .setPreferredBlockSize(newNode.getPreferredBlockSize())
+      .setStoragePolicyID(newNode.getLocalStoragePolicyID())
+      .setBlockType(PBHelperClient.convert(newNode.getBlockType()));
 
-  List<Long> fileIds = new ArrayList<>();
-  List<String> fileAttr = new ArrayList<>();
-  Iterator<INode> iterator = renameSet.iterator();
-  while (iterator.hasNext()) {
-    INode inode = iterator.next();
-    if (inode == null) continue;
-    strAttr.add(inode.getLocalName());
-    if (inode.getId() == 16385) {
-      strAttr.add(" ");
+    if (newNode.isStriped()) {
+      b.setErasureCodingPolicyID(newNode.getErasureCodingPolicyID());
     } else {
-      strAttr.add(inode.getParentName());
+      b.setReplication(newNode.getFileReplication());
     }
-    longAttr.add(inode.getParentId());
-    longAttr.add(inode.getId());
-    longAttr.add(inode.getModificationTime());
-    longAttr.add(inode.getAccessTime());
-    longAttr.add(inode.getPermissionLong());
-    if (inode.isDirectory()) {
-      longAttr.add(0L);
-    } else {
-      longAttr.add(inode.asFile().getHeaderLong());
-      FileUnderConstructionFeature uc = inode.asFile().getFileUnderConstructionFeature();
-      if (uc != null) {
-        fileIds.add(inode.getId());
-        fileAttr.add(uc.getClientName(inode.getId()));
-        fileAttr.add(uc.getClientMachine(inode.getId()));
+
+    AclFeature acl = newNode.getAclFeature();
+    if (acl != null) {
+      b.setAcl(buildAclEntries(acl));
+    }
+
+    XAttrFeature xAttrFeature = newNode.getXAttrFeature();
+    if (xAttrFeature != null) {
+      b.setXAttrs(buildXAttrs(xAttrFeature));
+    }
+
+    BlockInfo[] blocks = newNode.getBlocks();
+    if (blocks != null) {
+      for (Block block : blocks) {
+        b.addBlocks(PBHelperClient.convert(block));
       }
     }
-    iterator.remove();
-  }
-  try {
-    if (strAttr.size() > 0) {
-      DatabaseINode.batchUpdateINodes(longAttr, strAttr, fileIds, fileAttr);
+
+    FileUnderConstructionFeature uc = newNode.getFileUnderConstructionFeature();
+    if (uc != null) {
+      long id = newNode.getId();
+      INodeSection.FileUnderConstructionFeature f =
+        INodeSection.FileUnderConstructionFeature
+        .newBuilder().setClientName(uc.getClientName(id))
+        .setClientMachine(uc.getClientMachine(id)).build();
+      b.setFileUC(f);
     }
-  } catch (Exception e) {
-    e.printStackTrace();
+
+    INodeSection.INode r = null;
+    try {	
+      r = INodeSection.INode.newBuilder()
+        .setId(newNode.getId())
+        .setName(ByteString.copyFrom(newNode.getLocalNameBytes()))
+        .setType(INodeSection.INode.Type.FILE).setFile(b)
+        .setParent(newNode.getParentId()).build();
+    } catch (Exception e) {	
+        e.printStackTrace();	
+    }
+
+    return r;
   }
-}
+
+  public INodeSection.INode seralizeINodeDirectory(INodeDirectory newNode) {
+    INodeSection.INodeDirectory.Builder b = INodeSection.INodeDirectory
+      .newBuilder()
+      .setModificationTime(newNode.getModificationTime())
+      .setPermission(newNode.getPermissionLong());
+
+    AclFeature f = newNode.getAclFeature();
+    if (f != null) {
+      b.setAcl(buildAclEntries(f));
+    }
+
+    XAttrFeature xAttrFeature = newNode.getXAttrFeature();
+    if (xAttrFeature != null) {
+      b.setXAttrs(buildXAttrs(xAttrFeature));
+    }
+
+    INodeSection.INode r = null;
+    try {	
+      r = INodeSection.INode.newBuilder()
+        .setId(newNode.getId())
+        .setName(ByteString.copyFrom(newNode.getLocalNameBytes()))
+        .setType(INodeSection.INode.Type.DIRECTORY).setDirectory(b)
+        .setParent(newNode.getParentId()).build();
+    } catch (Exception e) {	
+        e.printStackTrace();	
+    }
+
+    return r;
+  }
+
+  void update_subtree_v2(Set<INode> renameSet, String nameNodeAddress) {
+    NamespaceSubtree.Builder b = NamespaceSubtree.newBuilder(); 
+
+    Iterator<INode> iterator = renameSet.iterator();
+    while (iterator.hasNext()) { 
+      INode inode = iterator.next(); 
+      if (inode == null) continue;
+      if (inode.isDirectory()) {
+        b.addInodes(seralizeINodeDirectory(inode.asDirectory()));
+      } else {
+        b.addInodes(seralizeINodeFile(inode.asFile()));
+      }
+      iterator.remove();
+    }
+    
+    try {
+      byte[] data = b.build().toByteArray();
+
+      FSEditLogProtocol proxy = (FSEditLogProtocol) RPC.getProxy(
+        FSEditLogProtocol.class, FSEditLogProtocol.versionID,
+        new InetSocketAddress(nameNodeAddress, 10086), new Configuration());
+      proxy.logEdit(data);
+    } catch (Exception e) {
+      e.printStackTrace();
+    }    
+  }
+
+  void update_subtree(Set<INode> renameSet) {
+    List<Long> longAttr = new ArrayList<>();
+    List<String> strAttr = new ArrayList<>();
+
+    List<Long> fileIds = new ArrayList<>();
+    List<String> fileAttr = new ArrayList<>();
+    Iterator<INode> iterator = renameSet.iterator();
+    while (iterator.hasNext()) {
+      INode inode = iterator.next();
+      if (inode == null) continue;
+      strAttr.add(inode.getLocalName());
+      if (inode.getId() == 16385) {
+        strAttr.add(" ");
+      } else {
+        strAttr.add(inode.getParentName());
+      }
+      longAttr.add(inode.getParentId());
+      longAttr.add(inode.getId());
+      longAttr.add(inode.getModificationTime());
+      longAttr.add(inode.getAccessTime());
+      longAttr.add(inode.getPermissionLong());
+      if (inode.isDirectory()) {
+        longAttr.add(0L);
+      } else {
+        longAttr.add(inode.asFile().getHeaderLong());
+        FileUnderConstructionFeature uc = inode.asFile().getFileUnderConstructionFeature();
+        if (uc != null) {
+          fileIds.add(inode.getId());
+          fileAttr.add(uc.getClientName(inode.getId()));
+          fileAttr.add(uc.getClientMachine(inode.getId()));
+        }
+      }
+      iterator.remove();
+    }
+    try {
+      if (strAttr.size() > 0) {
+        DatabaseINode.batchUpdateINodes(longAttr, strAttr, fileIds, fileAttr);
+      }
+    } catch (Exception e) {
+      e.printStackTrace();
+    }
+  }
 
   public void remoteRename(INode node, String oldName, String oldParent, String newParent, String address) {
     // FIXME: replace NameNode.getId() with 10000 to simplify the ID assignments
@@ -779,8 +914,8 @@ void update_subtree(Set<INode> renameSet) {
 
           if (child.getId() != old_id) {
             child.setParent(child.getParentId() + 40000000);
+            child.setParentName(newParent + child.getParentName().substring(skip_id));
           }
-          child.setParentName(newParent + child.getParentName() + child.getLocalName());
           child.setId(child.getId() + 40000000);
 
           if (child.isDirectory()) {
@@ -796,22 +931,23 @@ void update_subtree(Set<INode> renameSet) {
           }
 
           renameSet.add(child);
-          if (renameSet.size() >= 4096) {
-            update_subtree(renameSet);
-          }
+          // if (renameSet.size() >= 5120) {
+          //   update_subtree(renameSet);
+          // }
         }
       }
       if (renameSet.size() > 0) {
-        update_subtree(renameSet);
+        // update_subtree(renameSet);
+        update_subtree_v2(renameSet, address);
       }
 
-      // CompletableFuture.runAsync(() -> {
+      CompletableFuture.runAsync(() -> {
         // stored procedure:
         // (1) update subtree IDs and parent fields
         // DatabaseINode.updateSubtree(old_id, 100000, oldParent, "/nnThroughputBenchmark/rename", node.getParentId());
         // (2) remove all childs recursively
         DatabaseINode.removeChild(old_id);
-      // }, Database.getInstance().getExecutorService());
+      }, Database.getInstance().getExecutorService());
 
       // invalidate inode, and childs will be evicted eventually
       INodeKeyedObjects.getCache().invalidate(oldParent + oldName);
@@ -821,7 +957,7 @@ void update_subtree(Set<INode> renameSet) {
         .getEditLog()
         .logDelete(null, old_id, node.getModificationTime(), true);
 
-      node.setId(old_id + 100000);
+      node.setId(old_id + 40000000);
       // log: create new file
       FSDirectory.getInstance()
         .getEditLog()
@@ -829,7 +965,7 @@ void update_subtree(Set<INode> renameSet) {
 
       // CompletableFuture.runAsync(() -> {
         // stored procedure: 1 DML statements
-        DatabaseINode.setId(old_id, old_id + 100000, newParent, node.getParentId());
+        DatabaseINode.setId(old_id, old_id + 40000000, newParent, node.getParentId());
       // }, Database.getInstance().getExecutorService());
 
       // invalidate old node
